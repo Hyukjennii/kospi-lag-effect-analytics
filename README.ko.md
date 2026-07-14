@@ -1,10 +1,10 @@
-# 코스피 반응 지연 분석 (KOSPI Lag Effect Analytics)
+# 코스피 예측 분석 (KOSPI Predictive Analytics)
 
-![Status](https://img.shields.io/badge/status-in%20progress-yellow) ![Platform](https://img.shields.io/badge/platform-Python-blue) ![Stack](https://img.shields.io/badge/stack-pandas%20%7C%20statsmodels%20%7C%20FinanceDataReader-informational)
+![Status](https://img.shields.io/badge/status-in%20progress-yellow) ![Platform](https://img.shields.io/badge/platform-Python-blue) ![Stack](https://img.shields.io/badge/stack-statsmodels%20%7C%20XGBoost%20%7C%20SHAP-informational)
 
 [English](README.md) | 한국어
 
-기준금리와 원/달러 환율 변동이 코스피 지수와 어떤 관계가 있는지, 공개 데이터와 회귀분석으로 검증하는 프로젝트입니다.
+기준금리·원/달러 환율과 기술적 지표로 코스피 지수를 예측하고, 고전적 시계열 베이스라인과 머신러닝 모델을 워크포워드 검증(walk-forward validation)으로 비교한 뒤 SHAP으로 해석하는 프로젝트입니다.
 
 ---
 
@@ -23,9 +23,9 @@
 
 ## 개요
 
-공개된 시계열 데이터를 활용해 거시경제 지표(기준금리, 환율)와 코스피 지수 간의 관계를 분석합니다. 데이터 수집, 상관분석, 회귀 모델링에 더해 시차(lag) 분석까지 포함하여 통화정책 변화가 지연 효과를 갖고 주식시장에 반영되는지 검증합니다.
+이 프로젝트는 두 가지 연결된 질문을 다룹니다. (1) 기준금리와 원/달러 환율 변화가 코스피 지수에 지연되어 반영되는가, (2) 이 시차 관계를 기술적 지표와 결합하면 단순 상관관계 설명을 넘어 실제로 쓸만한 예측 모델을 만들 수 있는가. 고전적 계량경제 베이스라인(ARIMA/VAR)과 시차효과 회귀분석에서 시작해, 트리 기반 ML(Random Forest/XGBoost)과 LSTM을 시계열에 맞는 검증 방식으로 벤치마킹하고, SHAP 기반 피처 해석으로 모델이 블랙박스가 아니라 검증 가능하게 만듭니다.
 
-**목표**: 단순한 차트 관찰을 넘어, 재현 가능하고 통계적으로 근거 있는 금리·환율-증시 관계 분석을 만드는 것.
+**목표**: 엄격한 베이스라인 비교와 워크포워드 검증을 통해, ML 예측이 이 문제에서 실제로 고전적 시계열 기법보다 나은지 — 그리고 왜 그런지 — 보여주는 것.
 
 ---
 
@@ -35,22 +35,23 @@
 
 ```mermaid
 flowchart LR
-    A[데이터 수집] --> B[정제 및 병합]
-    B --> C[탐색적 분석]
-    C --> D[상관분석]
-    D --> E[회귀 모델링]
-    E --> F[시차 분석]
-    F --> G[리포트 및 시각화]
+    A[데이터 수집] --> B[피처 엔지니어링]
+    B --> C[베이스라인: ARIMA/VAR]
+    B --> D[ML 모델: RF/XGBoost/LSTM]
+    C --> E[워크포워드 검증]
+    D --> E
+    E --> F[평가 및 SHAP 해석]
+    F --> G[리포트]
 ```
 
-프로젝트는 데이터 수집 - 통계 분석 - 리포팅 3개 레이어로 구성됩니다. 각 레이어의 결과물이 다음 단계 모델링에 반영됩니다.
+프로젝트는 데이터 수집 - 피처 엔지니어링 - 베이스라인 vs ML 모델링 비교 - 평가/해석 4개 레이어로 구성됩니다. 베이스라인 레이어는 ML 레이어가 정당하게 비교될 대상을 만들기 위해 존재합니다.
 
 ### 데이터 파이프라인 아키텍처
 
 ```mermaid
 flowchart TD
     subgraph 데이터소스
-        S1[FinanceDataReader - 코스피]
+        S1[FinanceDataReader - 코스피 OHLCV]
         S2[한국은행 ECOS API - 기준금리]
         S3[한국은행 ECOS API - 원/달러 환율]
     end
@@ -58,12 +59,13 @@ flowchart TD
     S2 --> M
     S3 --> M
     M --> C[결측치 처리]
-    C --> V[시각화: 추세 라인]
-    V --> R[statsmodels: OLS 회귀]
+    C --> FE[피처 엔지니어링: 시차, 이동평균, 변동성, RSI]
+    FE --> SP[시간 순서를 지킨 train/val/test 분할]
 ```
 
 - 데이터 출처: FinanceDataReader(코스피), 한국은행 ECOS API(금리, 환율)
-- 기간: 최근 5~10년 월별 데이터
+- 기간: 최근 5~10년 일별/월별 데이터
+- 분할: 랜덤 셔플 없이 엄격히 시간 순서대로 분할 (데이터 누수 방지)
 
 ---
 
@@ -71,27 +73,36 @@ flowchart TD
 
 ```mermaid
 flowchart LR
-    A[원시 시계열] --> B[피어슨 상관분석]
-    B --> C[단순/다중 회귀]
-    C --> D[시차 분석 1-2개월]
-    D --> E[계수 해석]
+    A[엔지니어링된 피처] --> B[베이스라인: ARIMA / VAR]
+    A --> C[ML: Random Forest / XGBoost]
+    A --> D[딥러닝: LSTM]
+    B --> E[워크포워드 검증]
+    C --> E
+    D --> E
+    E --> F[RMSE, MAE, 방향성 정확도]
+    F --> G[SHAP 피처 기여도]
 ```
 
-- **데이터**: 코스피 월별 종가, 기준금리, 원/달러 환율
-- **모델**: 다중 선형회귀(코스피 ~ 금리 + 환율), 시차 변수 포함
-- **검증**: R², p-value, 잔차 진단
-- **결과물**: 계수 해석과 시차 효과 차트가 포함된 회귀분석 리포트
+- **베이스라인**: 원본 금리+환율+코스피 시계열에 대한 ARIMA와 VAR, 그리고 기존의 시차효과 회귀(코스피 ~ 금리 + 환율, lag 포함)를 설명적 벤치마크로 사용
+- **ML 모델**: 시차, 이동평균, 변동성, RSI 등 엔지니어링된 피처에 Random Forest / XGBoost 적용, LSTM을 딥러닝 비교 대상으로 추가
+- **검증**: 시계열에 k-fold를 쓰지 않고, 워크포워드(rolling-origin) 검증으로 시간 순서를 유지
+- **평가지표**: 크기 오차용 RMSE/MAE, 실무적 의미를 위한 방향성 정확도(상승/하락 예측 적중률)
+- **해석**: 최고 성능 ML 모델에 SHAP을 적용해, 어떤 피처(금리 시차, 환율 시차, 변동성 등)가 실제로 예측을 견인하는지 확인
+- **결과물**: 베이스라인 vs ML 비교표, 워크포워드 성능 차트, SHAP 요약 플롯
 
 ---
 
 ## 기술 스택
 
-| 구분      | 도구                              |
-| --------- | ----------------------------------- |
-| 데이터 수집 | FinanceDataReader, ECOS API         |
-| 데이터 처리 | pandas, numpy                       |
-| 시각화     | matplotlib, seaborn                 |
-| 모델링     | statsmodels                         |
+| 구분           | 도구                                      |
+| ------------------ | -------------------------------------------- |
+| 데이터 수집       | FinanceDataReader, ECOS API                 |
+| 데이터 처리       | pandas, numpy                               |
+| 고전 베이스라인   | statsmodels (ARIMA, VAR)                    |
+| ML 모델링         | scikit-learn (Random Forest), XGBoost       |
+| 딥러닝            | PyTorch 또는 TensorFlow/Keras (LSTM)        |
+| 해석              | SHAP                                        |
+| 시각화            | matplotlib, seaborn                         |
 
 ---
 
@@ -108,8 +119,15 @@ pip install -r requirements.txt
 # 데이터 수집 실행
 python src/collect_data.py
 
-# 분석 실행
-python src/run_analysis.py
+# 피처 생성
+python src/build_features.py
+
+# 베이스라인 및 ML 모델 학습
+python src/train_baselines.py
+python src/train_models.py
+
+# 워크포워드 평가 + SHAP 실행
+python src/evaluate.py
 ```
 
 > 세부 실행 방법은 `/src`, `/notebooks` 폴더에 문서화되어 있습니다.
@@ -118,14 +136,21 @@ python src/run_analysis.py
 
 ## 결과
 
-> 프로젝트 진행에 따라 채워질 예정 — 목표: 상관계수, 회귀 R², 시차 효과 결과.
+> 프로젝트 진행에 따라 채워질 예정 — 목표: 베이스라인 vs ML 성능 비교, 방향성 정확도, 주요 SHAP 피처.
 
-| 지표                     | 값 |
-| --------------------------- | ----- |
-| 코스피-금리 상관계수       | TBD   |
-| 코스피-환율 상관계수         | TBD   |
-| 회귀 R²               | TBD   |
-| 유의한 시차(개월)    | TBD   |
+| 모델                  | RMSE | 방향성 정확도 |
+| ------------------------ | ---- | --------------- |
+| ARIMA (베이스라인)         | TBD  | TBD              |
+| VAR (베이스라인)           | TBD  | TBD              |
+| 시차 회귀 (베이스라인)     | TBD  | TBD              |
+| Random Forest / XGBoost   | TBD  | TBD              |
+| LSTM                      | TBD  | TBD              |
+
+| 지표                        | 값 |
+| -------------------------------- | ----- |
+| 최고 성능 모델                    | TBD   |
+| 최상위 SHAP 피처                  | TBD   |
+| 유의한 시차(개월)                 | TBD   |
 
 ---
 
@@ -134,14 +159,17 @@ python src/run_analysis.py
 - [x] 프로젝트 범위 및 아키텍처 설계
 - [x] 다이어그램 설계
 - [ ] 데이터 수집 스크립트
-- [ ] 데이터 정제 및 병합 파이프라인
-- [ ] 상관분석
-- [ ] 회귀 모델링
-- [ ] 시차 분석
+- [ ] 피처 엔지니어링 (시차, 기술적 지표)
+- [ ] 베이스라인 모델 (ARIMA, VAR, 시차 회귀)
+- [ ] ML 모델 (Random Forest, XGBoost)
+- [ ] LSTM 모델
+- [ ] 워크포워드 검증 프레임워크
+- [ ] SHAP 해석
+- [ ] 베이스라인-ML 비교 리포트
 - [ ] 최종 리포트
 
 ---
 
 ## 배경
 
-통계데이터학과 개별 프로젝트의 일환으로, 공개 데이터 수집부터 회귀 모델링까지 전체 분석 흐름을 Python으로 연습하기 위해 진행합니다.
+통계데이터학과 개별 프로젝트의 일환으로, 머신러닝/예측모델링 대학원 트랙과 산업 데이터사이언스 포트폴리오를 겨냥한 플래그십 프로젝트로 설계했습니다. 단순히 ML을 예측 문제에 적용하는 것을 넘어, 고전적 시계열 기법과 정직하게 벤치마킹하고, 데이터 누수 없이 검증하며, 블랙박스가 아니라 해석 가능하게 만드는 것을 목표로 합니다.
